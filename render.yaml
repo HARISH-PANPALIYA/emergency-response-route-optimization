@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: emergency-backend
+    env: python
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+    buildCommand: |
+      python -m pip install --upgrade pip
+      python -m pip install -r backend/requirements.txt
+      python -m pip install cmake
+      cmake -S . -B build -D CMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')" -Dpybind11_DIR="$(python -m pybind11 --cmakedir)"
+      cmake --build build --config Release
+    startCommand: |
+      cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT

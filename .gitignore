@@ -1,0 +1,53 @@
+# Build artifacts
+build/
+cpp/build/
+**/__pycache__/
+*.pyc
+*.pyo
+*.db
+*.so
+*.dll
+*.dylib
+*.lib
+*.exp
+*.obj
+*.o
+
+# Python virtual environments
+.venv/
+venv/
+
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS files
+.DS_Store
+Thumbs.db
+.neon
+node_modules/
+.agents/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.swp
+*~
+
+# Local secret and credential files
+*.pem
+*.key
+*.crt
+*.p12
+credentials.json
+secrets.json
