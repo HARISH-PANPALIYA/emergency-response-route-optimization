@@ -1,247 +1,84 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  apiGet,
-  apiPatch,
-  apiPost,
-  clearToken,
-  getToken,
-  login,
-  register,
-} from "./services/api";
+import NetworkMap, { nearestNode, nodeToLatLng } from "./components/NetworkMap";
+import { reversePlace, searchPlaces, hasGeocodingKey } from "./services/geocoding";
+import { apiGet, apiPatch, apiPost, clearToken, getToken, login, register } from "./services/api";
 
 const emergencyTypes = ["MEDICAL", "FIRE", "CRIME", "ACCIDENT"];
-
-function MapView({ map, selectedEmergency }) {
-  const route = selectedEmergency?.route || [];
-  const alternativeRoute = selectedEmergency?.alternative_route || [];
-  const routeEdges = new Set(route.slice(0, -1).map((node, index) => `${node}-${route[index + 1]}`));
-  const alternativeEdges = new Set(alternativeRoute.slice(0, -1).map((node, index) => `${node}-${alternativeRoute[index + 1]}`));
-  const nodesById = new Map(map.nodes.map((node) => [node.id, node]));
-  const point = (node) => ({
-    x: (node.x / 120) * 80 + 40,
-    y: (node.y / 120) * 70 + 40,
-  });
-
-  return (
-    <svg viewBox="0 0 780 620" className="city-map" aria-label="Synthetic city road graph">
-      {map.edges.map((edge, index) => {
-        const from = nodesById.get(edge.source);
-        const to = nodesById.get(edge.destination);
-        if (!from || !to || edge.source > edge.destination) return null;
-        const start = point(from);
-        const end = point(to);
-        const active = routeEdges.has(`${edge.source}-${edge.destination}`) || routeEdges.has(`${edge.destination}-${edge.source}`);
-        const alternative = !active && (alternativeEdges.has(`${edge.source}-${edge.destination}`) || alternativeEdges.has(`${edge.destination}-${edge.source}`));
-        return (
-          <line
-            key={`${edge.source}-${edge.destination}-${index}`}
-            x1={start.x}
-            y1={start.y}
-            x2={end.x}
-            y2={end.y}
-            className={active ? "route-edge" : alternative ? "alternative-edge" : edge.blocked ? "blocked-edge" : "road-edge"}
-          />
-        );
-      })}
-      {(map.facilities || []).map((facility) => {
-        const position = point(nodesById.get(facility.node));
-        return <rect key={`facility-${facility.id}`} x={position.x - 7} y={position.y - 7} width="14" height="14" className="facility-marker" aria-label={facility.name} />;
-      })}
-      {(map.units || []).map((unit) => {
-        const position = point(nodesById.get(unit.node));
-        return <circle key={`unit-${unit.id}`} cx={position.x} cy={position.y} r="7" className={`unit-marker unit-${unit.status.toLowerCase()}`} aria-label={unit.name} />;
-      })}
-      {map.nodes.map((node) => {
-        const position = point(node);
-        const active = route.includes(node.id);
-        const incident = selectedEmergency?.location === node.id;
-        return (
-          <g key={node.id}>
-            <circle cx={position.x} cy={position.y} r={active || incident ? 9 : 5} className={incident ? "incident-node" : active ? "route-node" : "node"} />
-            <text x={position.x + 8} y={position.y + 4} className="node-label">{node.id}</text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
+const statuses = ["REPORTED", "ASSIGNING", "DISPATCHED", "IN_PROGRESS", "RESOLVED", "CANCELLED"];
+const emptySelection = { nodeId: null, latlng: null, label: "" };
 
 function LoginScreen({ onAuthenticated }) {
-  const [mode, setMode] = useState("login");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-
-  const submit = async (event) => {
-    event.preventDefault();
-    setError("");
-    try {
-      const result = mode === "login"
-        ? await login(email, password)
-        : await register(email, password);
-      onAuthenticated(result);
-    } catch (submissionError) {
-      setError(submissionError.message);
-    }
-  };
-
-  return (
-    <main className="auth-layout">
-      <section className="auth-card">
-        <p className="eyebrow">Municipal operations</p>
-        <h1>Emergency Control Center</h1>
-        <p className="muted">Sign in to report incidents or manage response operations.</p>
-        <form onSubmit={submit}>
-          <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
-          <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} required /></label>
-          {error && <p className="error-message">{error}</p>}
-          <button type="submit">{mode === "login" ? "SIGN IN" : "CREATE ACCOUNT"}</button>
-        </form>
-        <button className="link-button" onClick={() => setMode(mode === "login" ? "register" : "login")}>
-          {mode === "login" ? "Create a citizen account" : "Return to sign in"}
-        </button>
-      </section>
-    </main>
-  );
+  const [mode, setMode] = useState("login"); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [error, setError] = useState("");
+  async function submit(event) { event.preventDefault(); try { const result = mode === "login" ? await login(email, password) : await register(email, password); onAuthenticated(result); } catch (err) { setError(err.message); } }
+  return <main className="auth-layout"><section className="auth-card"><p className="eyebrow">Municipal operations</p><h1>Emergency Control Center</h1><p className="muted">A reliable channel for citizens and response teams.</p><form onSubmit={submit}><label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><label>Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={8} required /></label>{error && <p className="error-message">{error}</p>}<button type="submit">{mode === "login" ? "Sign in" : "Create account"}</button></form><button className="link-button" onClick={() => setMode(mode === "login" ? "register" : "login")}>{mode === "login" ? "Create a citizen account" : "Return to sign in"}</button></section></main>;
 }
+
+function LocationPicker({ map, value, onChange, purpose = "incident location", showNodeDetails = false }) {
+  const [query, setQuery] = useState(""); const [results, setResults] = useState([]); const [searchError, setSearchError] = useState(""); const [searching, setSearching] = useState(false);
+  async function select(latlng, label = "") {
+    const node = nearestNode(latlng, map.nodes || []);
+    let resolvedLabel = label;
+    if (!resolvedLabel && hasGeocodingKey) {
+      try { resolvedLabel = await reversePlace(latlng); } catch { resolvedLabel = ""; }
+    }
+    onChange({ nodeId: node?.id ?? null, latlng, label: resolvedLabel });
+  }
+  async function find(event) {
+    event.preventDefault();
+    setSearchError("");
+    setResults([]);
+    if (!query.trim()) return setSearchError("Enter an address, landmark, or area to search.");
+    setSearching(true);
+    try {
+      const places = await searchPlaces(query);
+      setResults(places);
+      if (!places.length) setSearchError("Unable to find that location.");
+    } catch (err) { setSearchError(err.message); } finally { setSearching(false); }
+  }
+  function currentLocation() {
+    if (!navigator.geolocation) return setSearchError("Location is not supported by this browser.");
+    setSearchError("");
+    navigator.geolocation.getCurrentPosition(
+      (position) => select({ lat: position.coords.latitude, lng: position.coords.longitude }, ""),
+      (error) => setSearchError(error.code === error.PERMISSION_DENIED ? "Location access was denied. Search for a location or click the map instead." : "Unable to access your current location."),
+    );
+  }
+  const node = (map.nodes || []).find((item) => item.id === value.nodeId);
+  return <div className="location-picker"><form className="search-row" onSubmit={find}><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${purpose}`} aria-label={`Search ${purpose}`} /><button type="submit" className="secondary" disabled={searching}>{searching ? "Searching…" : "Search"}</button><button type="button" className="secondary" onClick={currentLocation}>Use my location</button></form>{!hasGeocodingKey && <p className="muted helper">Add VITE_MAPTILER_API_KEY to enable address search. You can still select the map.</p>}{searchError && <p className="error-message" role="alert">{searchError}</p>}{results.length > 0 && <div className="search-results" aria-label="Location search results">{results.map((result) => <button type="button" key={result.label} onClick={() => { select({ lat: result.coordinates[0], lng: result.coordinates[1] }, result.label); setResults([]); }}>{result.label}</button>)}</div>}<NetworkMap data={map} selection={value} onSelectMap={(latlng) => select(latlng)} onSelectNode={(id) => onChange({ nodeId: id, latlng: nodeToLatLng(map.nodes.find((item) => item.id === id), map.nodes), label: "Selected map point" })} /><p className="selection-confirmation" aria-live="polite">{value.nodeId == null ? `Select a point on the map to continue.` : <>Location confirmed: <strong>{value.label || "Selected map point"}</strong>{showNodeDetails && <> · nearest demo network node <strong>{node?.id}</strong></>}</>}</p></div>;
+}
+
+function Timeline({ item }) { return <div className="timeline"><div className="timeline-item active"><span />Reported<strong>{new Date(item.created_at).toLocaleString()}</strong></div><div className={`timeline-item ${["RESOLVED", "CANCELLED"].includes(item.status) ? "active" : ""}`}><span />Current status<strong>{item.status.replace("_", " ")}</strong></div></div>; }
+
+function CitizenDashboard({ map, emergencies, refresh, error, setError, logout }) {
+  const [form, setForm] = useState({ emergency_type: "MEDICAL", description: "" }); const [selection, setSelection] = useState(emptySelection); const [submitting, setSubmitting] = useState(false);
+  async function submit(event) { event.preventDefault(); if (selection.nodeId == null) return setError("Choose an incident location on the map first."); setSubmitting(true); try { await apiPost("/emergencies", { ...form, location: selection.nodeId }); setForm({ emergency_type: "MEDICAL", description: "" }); setSelection(emptySelection); await refresh(); } catch (err) { setError(err.message); } finally { setSubmitting(false); } }
+  return <div className="app-shell"><header className="topbar"><div><p className="eyebrow">Citizen services</p><h1>Report an emergency</h1></div><button className="secondary" onClick={logout}>Sign out</button></header><main className="citizen-layout"><section className="user-card"><h2>Tell us what happened</h2><p className="muted">Choose the location first. Your report is sent to the response team for routing.</p><form onSubmit={submit}><label>Emergency type<select value={form.emergency_type} onChange={(e) => setForm({ ...form, emergency_type: e.target.value })}>{emergencyTypes.map((type) => <option key={type}>{type}</option>)}</select></label><LocationPicker map={map} value={selection} onChange={setSelection} /><label>Description<textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} minLength={5} maxLength={1000} rows={4} required placeholder="Briefly describe the situation" /></label>{error && <p className="error-message">{error}</p>}<button type="submit" disabled={submitting}>{submitting ? "Sending…" : "Report emergency"}</button></form></section><section className="status-card"><h2>Your reports</h2>{emergencies.length === 0 ? <p className="muted">No reports yet.</p> : emergencies.map((item) => <article className="report-row" key={item.id}><div className="report-heading"><strong>#{item.id} · {item.emergency_type}</strong><span className={`status status-${item.status.toLowerCase()}`}>{item.status.replace("_", " ")}</span></div><small>Demo network node {item.location}{item.assigned_unit ? ` · ${item.assigned_unit}` : ""}</small><p>{item.description}</p><Timeline item={item} /></article>)}</section></main></div>;
+}
+
+function AdminDashboard({ map, emergencies, facilities, units, refresh, error, setError, logout }) {
+  const [selected, setSelected] = useState(emergencies[0] || null); const [filter, setFilter] = useState("ALL"); const [section, setSection] = useState("emergencies"); const filtered = useMemo(() => filter === "ALL" ? emergencies : emergencies.filter((item) => item.status === filter), [emergencies, filter]);
+  useEffect(() => { setSelected((current) => emergencies.find((item) => item.id === current?.id) || emergencies[0] || null); }, [emergencies]);
+  async function action(path) { try { await apiPost(path); await refresh(); } catch (err) { setError(err.message); } }
+  return <div className="app-shell"><header className="topbar"><div><p className="eyebrow">Municipal operations · Demo network</p><h1>Emergency Control Center</h1></div><div className="topbar-actions"><nav className="button-row" aria-label="Administration views">{["emergencies", "facilities", "units", "roads"].map((item) => <button key={item} className={section === item ? "" : "secondary"} onClick={() => setSection(item)}>{item}</button>)}</nav><button className="secondary" onClick={logout}>Sign out</button></div></header>{error && <p className="error-message page-error">{error}</p>}{section !== "emergencies" ? <InventoryPanel section={section} facilities={facilities} units={units} map={map} refresh={refresh} setError={setError} /> : <main className="admin-layout"><aside className="sidebar"><h2>Response queue</h2><select value={filter} onChange={(e) => setFilter(e.target.value)}><option>ALL</option>{statuses.map((status) => <option key={status}>{status}</option>)}</select><ul className="nav-list">{filtered.map((item) => <li key={item.id} className={selected?.id === item.id ? "selected" : ""} onClick={() => setSelected(item)}><strong>#{item.id} · {item.emergency_type}</strong><small>{item.status} · node {item.location}</small></li>)}</ul><div className="inventory-summary"><span>Facilities <b>{facilities.length}</b></span><span>Units <b>{units.length}</b></span><span>Graph nodes <b>{map.nodes?.length || 0}</b></span></div></aside><section className="main-panel"><NetworkMap data={map} selectedEmergency={selected} selection={emptySelection} onSelectMap={() => {}} onSelectNode={() => {}} /></section><aside className="detail-panel"><h2>{selected ? `Emergency #${selected.id}` : "No selection"}</h2>{selected ? <><dl className="detail-list"><div><dt>Type</dt><dd>{selected.emergency_type}</dd></div><div><dt>Status</dt><dd>{selected.status}</dd></div><div><dt>Location</dt><dd>Demo node {selected.location}</dd></div><div><dt>Unit</dt><dd>{selected.assigned_unit || "Unassigned"}</dd></div><div><dt>Facility</dt><dd>{selected.facility || "Unassigned"}</dd></div><div><dt>Primary route</dt><dd>{selected.route?.length ? selected.route.join(" → ") : "Not assigned"}</dd></div><div><dt>Alternative</dt><dd>{selected.alternative_route?.length ? selected.alternative_route.join(" → ") : "Not supplied"}</dd></div><div><dt>Travel cost</dt><dd>{selected.travel_cost ?? "—"}</dd></div></dl><p>{selected.description}</p><Timeline item={selected} /><div className="button-row">{["REPORTED", "ASSIGNING"].includes(selected.status) && <button onClick={() => action(`/emergencies/${selected.id}/auto-assign`)}>Auto assign</button>}{selected.status === "DISPATCHED" && <button className="secondary" onClick={() => action(`/emergencies/${selected.id}/status/IN_PROGRESS`)}>Start response</button>}{selected.status === "IN_PROGRESS" && <button className="secondary" onClick={() => action(`/emergencies/${selected.id}/status/RESOLVED`)}>Resolve</button>}{!["RESOLVED", "CANCELLED"].includes(selected.status) && <button className="danger" onClick={() => action(`/emergencies/${selected.id}/status/CANCELLED`)}>Cancel</button>}</div></> : <p className="muted">Select an emergency from the queue.</p>}</aside></main>}</div>;
+}
+
+function InventoryPanel({ section, facilities, units, map, refresh, setError }) {
+  const [roads, setRoads] = useState([]); const [facility, setFacility] = useState({ name: "", type: "HOSPITAL", node: 0 }); const [unit, setUnit] = useState({ id: "", name: "", type: "AMBULANCE", current_node: 0 }); const [placement, setPlacement] = useState({ nodeId: null, latlng: null, label: "" });
+  useEffect(() => { if (section === "roads") apiGet("/roads").then(setRoads).catch((err) => setError(err.message)); }, [section, setError]);
+  async function save(path, payload, reset) { try { await apiPost(path, payload); reset(); await refresh(); } catch (err) { setError(err.message); } }
+  if (section === "facilities") return <section className="inventory-panel"><h2>Facility management</h2><p className="muted">Search or click the demo map to place the facility.</p><LocationPicker map={map} value={placement} purpose="a facility location" showNodeDetails onChange={setPlacement} /><form className="inline-form" onSubmit={(e) => { e.preventDefault(); if (placement.nodeId == null) return setError("Select a facility location on the map."); save("/facilities", { ...facility, node: Number(placement.nodeId), status: "ACTIVE" }, () => { setFacility({ name: "", type: "HOSPITAL", node: 0 }); setPlacement({ nodeId: null, latlng: null, label: "" }); }); }}><input placeholder="Facility name" value={facility.name} onChange={(e) => setFacility({ ...facility, name: e.target.value })} required /><select value={facility.type} onChange={(e) => setFacility({ ...facility, type: e.target.value })}><option>HOSPITAL</option><option>POLICE_STATION</option><option>FIRE_STATION</option><option>AMBULANCE_CENTER</option></select><button>Add facility</button></form><InventoryTable items={facilities} fields={["name", "type", "node", "status"]} onToggle={(item) => apiPatch(`/facilities/${item.id}`, { status: item.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" }).then(refresh).catch((err) => setError(err.message))} /></section>;
+  if (section === "units") return <section className="inventory-panel"><h2>Unit management</h2><p className="muted">Search or click the demo map to place the unit.</p><LocationPicker map={map} value={placement} purpose="a unit location" showNodeDetails onChange={setPlacement} /><form className="inline-form" onSubmit={(e) => { e.preventDefault(); if (placement.nodeId == null) return setError("Select a unit location on the map."); save("/units", { ...unit, current_node: Number(placement.nodeId), status: "AVAILABLE" }, () => { setUnit({ id: "", name: "", type: "AMBULANCE", current_node: 0 }); setPlacement({ nodeId: null, latlng: null, label: "" }); }); }}><input placeholder="Unit ID" value={unit.id} onChange={(e) => setUnit({ ...unit, id: e.target.value })} required /><input placeholder="Unit name" value={unit.name} onChange={(e) => setUnit({ ...unit, name: e.target.value })} required /><select value={unit.type} onChange={(e) => setUnit({ ...unit, type: e.target.value })}><option>AMBULANCE</option><option>FIRE_TRUCK</option><option>POLICE_VEHICLE</option></select><button>Add unit</button></form><InventoryTable items={units} fields={["id", "name", "type", "current_node", "status"]} onToggle={(item) => apiPatch(`/units/${item.id}`, { status: item.status === "OFFLINE" ? "AVAILABLE" : "OFFLINE" }).then(refresh).catch((err) => setError(err.message))} /></section>;
+  return <section className="inventory-panel"><h2>Road network controls</h2><p className="muted">Internal graph IDs stay hidden from citizens; controls below manage the demo network used by the routing service.</p><div className="inventory-list">{roads.map((road) => <div className="inventory-row" key={road.id}><span>Demo node {road.source} → {road.destination}</span><input type="number" min="0.01" step="0.1" value={road.weight} onChange={(e) => setRoads((items) => items.map((item) => item.id === road.id ? { ...item, weight: e.target.value } : item))} onBlur={() => apiPatch(`/roads/${road.id}`, { weight: Number(road.weight) }).catch((err) => setError(err.message))} /><span className={road.blocked ? "blocked-label" : ""}>{road.blocked ? "BLOCKED" : "OPEN"}</span><button className="secondary" onClick={() => apiPatch(`/roads/${road.id}`, { blocked: !road.blocked }).then(() => setRoads((items) => items.map((item) => item.id === road.id ? { ...item, blocked: !item.blocked } : item))).catch((err) => setError(err.message))}>{road.blocked ? "Unblock" : "Block"}</button></div>)}</div></section>;
+}
+function InventoryTable({ items, fields, onToggle }) { return <div className="inventory-list">{items.map((item) => <div className="inventory-row" key={item.id}>{fields.map((field) => <span key={field}>{item[field]}</span>)}<button className="secondary" onClick={() => onToggle(item)}>{item.status === "ACTIVE" || item.status === "AVAILABLE" ? "Deactivate" : "Activate"}</button></div>)}</div>; }
 
 export default function App() {
-  const [user, setUser] = useState(null);
-  const [map, setMap] = useState({ nodes: [], edges: [] });
-  const [emergencies, setEmergencies] = useState([]);
-  const [facilities, setFacilities] = useState([]);
-  const [units, setUnits] = useState([]);
-  const [selectedEmergency, setSelectedEmergency] = useState(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(Boolean(getToken()));
-
-  const refresh = async () => {
-    const [mapData, facilityData, unitData, emergencyData] = await Promise.all([
-      apiGet("/map"),
-      apiGet("/facilities"),
-      apiGet("/units"),
-      apiGet("/emergencies"),
-    ]);
-    setMap(mapData);
-    setFacilities(facilityData);
-    setUnits(unitData);
-    setEmergencies(emergencyData);
-    setSelectedEmergency((current) => emergencyData.find((item) => item.id === current?.id) || emergencyData[0] || null);
-  };
-
-  useEffect(() => {
-    if (!getToken()) return;
-    apiGet("/auth/current-user")
-      .then((currentUser) => setUser(currentUser))
-      .catch(() => clearToken())
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    if (user) {
-      refresh().catch((loadError) => setError(loadError.message));
-    }
-  }, [user]);
-
+  const [user, setUser] = useState(null); const [map, setMap] = useState({ nodes: [], edges: [], facilities: [], units: [] }); const [emergencies, setEmergencies] = useState([]); const [facilities, setFacilities] = useState([]); const [units, setUnits] = useState([]); const [error, setError] = useState(""); const [loading, setLoading] = useState(Boolean(getToken()));
+  const refresh = async () => { const [mapData, facilityData, unitData, emergencyData] = await Promise.all([apiGet("/map"), apiGet("/facilities"), apiGet("/units"), apiGet("/emergencies")]); setMap(mapData); setFacilities(facilityData); setUnits(unitData); setEmergencies(emergencyData); };
+  useEffect(() => { if (!getToken()) return; apiGet("/auth/current-user").then(setUser).catch(clearToken).finally(() => setLoading(false)); }, []);
+  useEffect(() => { if (user) refresh().catch((err) => setError(err.message)); }, [user]);
   if (loading) return <main className="loading-screen">Connecting to response services…</main>;
   if (!user) return <LoginScreen onAuthenticated={() => apiGet("/auth/current-user").then(setUser)} />;
-
-  const logout = () => {
-    clearToken();
-    setUser(null);
-  };
-
-  return user.role === "ADMIN"
-    ? <AdminDashboard map={map} emergencies={emergencies} facilities={facilities} units={units} selectedEmergency={selectedEmergency} setSelectedEmergency={setSelectedEmergency} refresh={refresh} setError={setError} error={error} logout={logout} />
-    : <CitizenDashboard emergencies={emergencies} refresh={refresh} setError={setError} error={error} logout={logout} />;
-}
-
-function CitizenDashboard({ emergencies, refresh, setError, error, logout }) {
-  const [form, setForm] = useState({ emergency_type: "MEDICAL", location: 0, description: "" });
-  const submit = async (event) => {
-    event.preventDefault();
-    try {
-      await apiPost("/emergencies", { ...form, location: Number(form.location) });
-      setForm({ emergency_type: "MEDICAL", location: 0, description: "" });
-      await refresh();
-    } catch (submissionError) {
-      setError(submissionError.message);
-    }
-  };
-
-  return (
-    <div className="app-shell">
-      <header className="topbar"><div><p className="eyebrow">Citizen services</p><h1>Emergency Reports</h1></div><button className="secondary" onClick={logout}>Sign out</button></header>
-      <main className="user-layout">
-        <section className="user-card"><h2>Report Emergency</h2><form onSubmit={submit}>
-          <label>Emergency type<select value={form.emergency_type} onChange={(event) => setForm({ ...form, emergency_type: event.target.value })}>{emergencyTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
-          <label>Incident graph node<input type="number" min="0" max="35" value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} required /></label>
-          <label>Description<textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} minLength={5} maxLength={1000} rows={5} required /></label>
-          {error && <p className="error-message">{error}</p>}
-          <button type="submit">REPORT EMERGENCY</button>
-        </form></section>
-        <section className="status-card"><h2>My Reports</h2>{emergencies.length === 0 ? <p className="muted">No emergency reports yet.</p> : emergencies.map((item) => <article className="report-row" key={item.id}><strong>#{item.id} · {item.emergency_type}</strong><span className={`status status-${item.status.toLowerCase()}`}>{item.status}</span><small>Location node {item.location}{item.assigned_unit ? ` · ${item.assigned_unit}` : ""}</small></article>)}</section>
-      </main>
-    </div>
-  );
-}
-
-function AdminDashboard({ map, emergencies, facilities, units, selectedEmergency, setSelectedEmergency, refresh, setError, error, logout }) {
-  const [filter, setFilter] = useState("ALL");
-  const [section, setSection] = useState("emergencies");
-  const filtered = useMemo(() => filter === "ALL" ? emergencies : emergencies.filter((item) => item.status === filter), [emergencies, filter]);
-
-  const action = async (path) => {
-    try {
-      await apiPost(path);
-      await refresh();
-    } catch (actionError) {
-      setError(actionError.message);
-    }
-  };
-
-  return (
-    <div className="app-shell">
-      <header className="topbar"><div><p className="eyebrow">Municipal operations</p><h1>Emergency Control Center</h1></div><div className="topbar-actions"><span className="role-label">ADMIN</span><div className="button-row"><button className={section === "emergencies" ? "" : "secondary"} onClick={() => setSection("emergencies")}>Emergencies</button><button className={section === "facilities" ? "" : "secondary"} onClick={() => setSection("facilities")}>Facilities</button><button className={section === "units" ? "" : "secondary"} onClick={() => setSection("units")}>Units</button><button className={section === "roads" ? "" : "secondary"} onClick={() => setSection("roads")}>Road network</button></div><button className="secondary" onClick={logout}>Sign out</button></div></header>
-      {error && <p className="error-message page-error">{error}</p>}
-      {section === "emergencies" ? <main className="admin-layout">
-        <aside className="sidebar"><div className="sidebar-section"><h3>Emergencies</h3><select value={filter} onChange={(event) => setFilter(event.target.value)}><option>ALL</option>{["REPORTED", "ASSIGNING", "DISPATCHED", "IN_PROGRESS", "RESOLVED", "CANCELLED"].map((status) => <option key={status}>{status}</option>)}</select><ul className="nav-list">{filtered.map((item) => <li key={item.id} className={selectedEmergency?.id === item.id ? "selected" : ""} onClick={() => setSelectedEmergency(item)}>#{item.id} {item.emergency_type}<small>{item.status}</small></li>)}</ul></div><div className="sidebar-section"><h3>Network inventory</h3><p className="metric-line">Facilities <strong>{facilities.length}</strong></p><p className="metric-line">Units <strong>{units.length}</strong></p><p className="metric-line">Graph nodes <strong>{map.nodes.length}</strong></p></div></aside>
-        <section className="main-panel"><MapView map={map} selectedEmergency={selectedEmergency} /></section>
-        <aside className="detail-panel"><h3>{selectedEmergency ? `Emergency #${selectedEmergency.id}` : "No selected emergency"}</h3>{selectedEmergency ? <><dl className="detail-list"><div><dt>Type</dt><dd>{selectedEmergency.emergency_type}</dd></div><div><dt>Status</dt><dd>{selectedEmergency.status}</dd></div><div><dt>Incident node</dt><dd>{selectedEmergency.location}</dd></div><div><dt>Unit</dt><dd>{selectedEmergency.assigned_unit || "Unassigned"}</dd></div><div><dt>Facility</dt><dd>{selectedEmergency.facility || "Unassigned"}</dd></div><div><dt>Route cost</dt><dd>{selectedEmergency.travel_cost ?? "—"}</dd></div></dl><div className="button-row">{["REPORTED", "ASSIGNING"].includes(selectedEmergency.status) && <button onClick={() => action(`/emergencies/${selectedEmergency.id}/auto-assign`)}>Auto assign</button>}{selectedEmergency.status === "DISPATCHED" && <button className="secondary" onClick={() => action(`/emergencies/${selectedEmergency.id}/status/IN_PROGRESS`)}>Start response</button>}{selectedEmergency.status === "IN_PROGRESS" && <button className="secondary" onClick={() => action(`/emergencies/${selectedEmergency.id}/status/RESOLVED`)}>Resolve</button>}{!["RESOLVED", "CANCELLED"].includes(selectedEmergency.status) && <button className="danger" onClick={() => action(`/emergencies/${selectedEmergency.id}/status/CANCELLED`)}>Cancel</button>}</div></> : <p className="muted">Select an emergency from the queue.</p>}</aside>
-      </main> : <InventoryPanel section={section} facilities={facilities} units={units} refresh={refresh} setError={setError} />}
-    </div>
-  );
-}
-
-function InventoryPanel({ section, facilities, units, refresh, setError }) {
-  const [roads, setRoads] = useState([]);
-  const [facility, setFacility] = useState({ name: "", type: "HOSPITAL", node: 0, status: "ACTIVE" });
-  const [unit, setUnit] = useState({ id: "", name: "", type: "AMBULANCE", current_node: 0, status: "AVAILABLE" });
-
-  useEffect(() => {
-    if (section === "roads") apiGet("/roads").then(setRoads).catch((error) => setError(error.message));
-  }, [section, setError]);
-
-  const saveFacility = async (event) => {
-    event.preventDefault();
-    try { await apiPost("/facilities", { ...facility, node: Number(facility.node) }); setFacility({ name: "", type: "HOSPITAL", node: 0, status: "ACTIVE" }); await refresh(); }
-    catch (error) { setError(error.message); }
-  };
-  const saveUnit = async (event) => {
-    event.preventDefault();
-    try { await apiPost("/units", { ...unit, current_node: Number(unit.current_node) }); setUnit({ id: "", name: "", type: "AMBULANCE", current_node: 0, status: "AVAILABLE" }); await refresh(); }
-    catch (error) { setError(error.message); }
-  };
-  const updateRoad = async (road, patch) => {
-    try { await apiPatch(`/roads/${road.id}`, patch); setRoads((items) => items.map((item) => item.id === road.id ? { ...item, ...patch } : item)); }
-    catch (error) { setError(error.message); }
-  };
-
-  if (section === "facilities") return <section className="inventory-panel"><h2>Facility management</h2><form className="inline-form" onSubmit={saveFacility}><input placeholder="Facility name" value={facility.name} onChange={(event) => setFacility({ ...facility, name: event.target.value })} required /><select value={facility.type} onChange={(event) => setFacility({ ...facility, type: event.target.value })}><option>HOSPITAL</option><option>POLICE_STATION</option><option>FIRE_STATION</option><option>AMBULANCE_CENTER</option></select><input type="number" min="0" max="35" value={facility.node} onChange={(event) => setFacility({ ...facility, node: event.target.value })} /><button type="submit">Add facility</button></form><InventoryTable items={facilities} fields={["name", "type", "node", "status"]} onToggle={(item) => apiPatch(`/facilities/${item.id}`, { status: item.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" }).then(refresh).catch((error) => setError(error.message))} /></section>;
-  if (section === "units") return <section className="inventory-panel"><h2>Unit management</h2><form className="inline-form" onSubmit={saveUnit}><input placeholder="Unit ID" value={unit.id} onChange={(event) => setUnit({ ...unit, id: event.target.value })} required /><input placeholder="Unit name" value={unit.name} onChange={(event) => setUnit({ ...unit, name: event.target.value })} required /><select value={unit.type} onChange={(event) => setUnit({ ...unit, type: event.target.value })}><option>AMBULANCE</option><option>FIRE_TRUCK</option><option>POLICE_VEHICLE</option></select><input type="number" min="0" max="35" value={unit.current_node} onChange={(event) => setUnit({ ...unit, current_node: event.target.value })} /><button type="submit">Add unit</button></form><InventoryTable items={units} fields={["id", "name", "type", "current_node", "status"]} onToggle={(item) => apiPatch(`/units/${item.id}`, { status: item.status === "OFFLINE" ? "AVAILABLE" : "OFFLINE" }).then(refresh).catch((error) => setError(error.message))} /></section>;
-  return <section className="inventory-panel"><h2>Road network</h2><div className="inventory-list">{roads.map((road) => <div className="inventory-row" key={road.id}><span>{road.source} → {road.destination}</span><input type="number" min="0.01" step="0.1" value={road.weight} onChange={(event) => setRoads((items) => items.map((item) => item.id === road.id ? { ...item, weight: event.target.value } : item))} onBlur={() => updateRoad(road, { weight: Number(road.weight) })} /><span>{road.blocked ? "BLOCKED" : "OPEN"}</span><button className="secondary" onClick={() => updateRoad(road, { blocked: !road.blocked })}>{road.blocked ? "Unblock" : "Block"}</button></div>)}</div></section>;
-}
-
-function InventoryTable({ items, fields, onToggle }) {
-  return <div className="inventory-list">{items.map((item) => <div className="inventory-row" key={item.id}>{fields.map((field) => <span key={field}>{item[field]}</span>)}<button className="secondary" onClick={() => onToggle(item)}>{item.status === "ACTIVE" || item.status === "AVAILABLE" ? "Deactivate" : "Activate"}</button></div>)}</div>;
+  const logout = () => { clearToken(); setUser(null); };
+  return user.role === "ADMIN" ? <AdminDashboard map={map} emergencies={emergencies} facilities={facilities} units={units} refresh={refresh} error={error} setError={setError} logout={logout} /> : <CitizenDashboard map={map} emergencies={emergencies} refresh={refresh} error={error} setError={setError} logout={logout} />;
 }
